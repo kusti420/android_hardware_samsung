@@ -13,8 +13,10 @@
 #include <android-base/parseint.h>
 #include <android-base/strings.h>
 
+#include <cstring>
 #include <fcntl.h>
 #include <linux/uinput.h>
+#include <unistd.h>
 
 using namespace ::android::fingerprint::samsung;
 
@@ -66,6 +68,7 @@ Fingerprint::Fingerprint() {
     mSupportsGestures =
             FingerprintHalProperties::supports_gestures().value_or(SUPPORTS_NAVIGATION_GESTURES);
 
+
     if (mSupportsGestures) {
         mHal.request(FINGERPRINT_REQUEST_NAVIGATION_MODE_START, 1);
 
@@ -86,7 +89,7 @@ Fingerprint::Fingerprint() {
         sprintf(uidev.name, "uinput-sec-fp");
         uidev.id.bustype = BUS_VIRTUAL;
 
-        err = write(uinputFd, &uidev, sizeof(uidev));
+        err = static_cast<int>(write(uinputFd, &uidev, sizeof(uidev)));
         if (err < 0) {
             LOG(ERROR) << "Write user device to uinput node failed";
             goto skip_uinput_setup;
@@ -161,8 +164,8 @@ ndk::ScopedAStatus Fingerprint::createSession(int32_t /*sensorId*/, int32_t user
 void Fingerprint::notify(const fingerprint_msg_t* msg) {
     Fingerprint* thisPtr = sInstance;
     if (msg->type == FINGERPRINT_ACQUIRED &&
-        msg->data.acquired.acquired_info > SEM_FINGERPRINT_EVENT_BASE) {
-        thisPtr->handleEvent(msg->data.acquired.acquired_info);
+        static_cast<int>(msg->data.acquired.acquired_info) > SEM_FINGERPRINT_EVENT_BASE) {
+        thisPtr->handleEvent(static_cast<int>(msg->data.acquired.acquired_info));
         return;
     }
 
@@ -181,7 +184,8 @@ void Fingerprint::handleEvent(int eventCode) {
             if (!mSupportsGestures) return;
 
             struct input_event event{};
-            int keycode = eventCode == SEM_FINGERPRINT_EVENT_GESTURE_SWIPE_UP ? KEY_UP : KEY_DOWN;
+            __u16 keycode = eventCode == SEM_FINGERPRINT_EVENT_GESTURE_SWIPE_UP
+                    ? static_cast<__u16>(KEY_UP) : static_cast<__u16>(KEY_DOWN);
 
             // Report the key
             event.type = EV_KEY;
@@ -220,9 +224,35 @@ void Fingerprint::handleEvent(int eventCode) {
             }
         } break;
         case SEM_FINGERPRINT_EVENT_CAPTURE_READY: {
+            LOG(INFO) << "SEM event: CAPTURE_READY";
             if (mSession != nullptr && !mSession->isClosed()) {
                 mSession->onCaptureReady();
             }
+        } break;
+        case SEM_FINGERPRINT_EVENT_CAPTURE_STARTED: {
+            LOG(INFO) << "SEM event: CAPTURE_STARTED";
+        } break;
+        case SEM_FINGERPRINT_EVENT_CAPTURE_COMPLETED: {
+            LOG(INFO) << "SEM event: CAPTURE_COMPLETED";
+        } break;
+        case SEM_FINGERPRINT_EVENT_FINGER_LEAVE: {
+            LOG(INFO) << "SEM event: FINGER_LEAVE";
+        } break;
+        case SEM_FINGERPRINT_EVENT_CAPTURE_SUCCESS: {
+            LOG(INFO) << "SEM event: CAPTURE_SUCCESS (enrollment accepted)";
+        } break;
+        case SEM_FINGERPRINT_EVENT_CAPTURE_FAILED: {
+            LOG(INFO) << "SEM event: CAPTURE_FAILED (bad quality)";
+            // Forward as ACQUIRED_INSUFFICIENT so the framework shows feedback
+            if (mSession != nullptr && !mSession->isClosed()) {
+                fingerprint_msg_t msg = {};
+                msg.type = FINGERPRINT_ACQUIRED;
+                msg.data.acquired.acquired_info = FINGERPRINT_ACQUIRED_INSUFFICIENT;
+                mSession->notify(&msg);
+            }
+        } break;
+        default: {
+            LOG(INFO) << "SEM event: unhandled code " << eventCode;
         } break;
     }
 }

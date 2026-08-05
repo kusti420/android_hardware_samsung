@@ -76,6 +76,7 @@ class Session : public BnSession {
     bool mClosed = false;
     bool mCaptureReady = false;
 
+    void setHBM(bool enable);
     Error VendorErrorFilter(int32_t error, int32_t* vendorCode);
     AcquiredInfo VendorAcquiredFilter(int32_t info, int32_t* vendorCode);
     bool checkSensorLockout();
