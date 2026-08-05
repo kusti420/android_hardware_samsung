@@ -235,12 +235,11 @@ ndk::ScopedAStatus Session::onPointerDown(int32_t /*pointerId*/, int32_t /*x*/, 
                                           float /*minor*/, float /*major*/) {
     LOG(INFO) << "onPointerDown";
 
-    // Turn on display HBM so the optical sensor has light to capture.
-    // This MUST be per-touch: BAuth's later enrollment stages need the
-    // illumination to cycle off between captures (unlit reference frame).
-    // Holding HBM for the whole session stalls enrollment permanently at
-    // the stage boundary (rem=92) — measured, see DIV-007.
-    setHBM(true);
+    // NOTE: HBM is deliberately NOT enabled here. mask_brightness drives the
+    // WHOLE panel to 547 nits, and SystemUI's dim overlay needs a frame or two
+    // to composite. Lighting up on touch-down therefore flashes the entire
+    // screen before the dim lands. onUiReady() is dispatched once the
+    // illumination overlay is actually on screen, so HBM is enabled there.
 
     // Send touch-down event — this is the ONLY signal OneUI's HIDL
     // service sends to BAuth on finger touch.  Do NOT call
@@ -279,7 +278,10 @@ ndk::ScopedAStatus Session::onPointerUp(int32_t /*pointerId*/) {
 
 ndk::ScopedAStatus Session::onUiReady() {
     LOG(INFO) << "onUiReady";
-    // Framework handles HBM — nothing for the HAL to do here.
+    // The illumination overlay (dim + disc) is on screen now, so raising panel
+    // HBM can no longer flash the undimmed screen. Still per-touch: BAuth needs
+    // the illumination to cycle off between captures (see DIV-007).
+    setHBM(true);
     return ndk::ScopedAStatus::ok();
 }
 
