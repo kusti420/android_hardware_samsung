@@ -16,6 +16,8 @@
 
 #define LOG_TAG "android.hardware.keymaster@4.0-service.samsung"
 
+#include <unistd.h>
+
 #include <android-base/logging.h>
 #include <android/hardware/keymaster/4.0/IKeymasterDevice.h>
 #include <hidl/HidlTransportSupport.h>
@@ -44,15 +46,15 @@ int main() {
     status_t status = keymaster->registerAsService();
 
     if (status != OK) {
-        LOG(ERROR) << "Could not register service for Keymaster HAL";
-        goto shutdown;
+        LOG(ERROR) << "Could not register service for Keymaster HAL: " << status
+                   << ", keeping TA loaded";
+        pause();
+        return -1;
     }
 
     LOG(INFO) << "Keymaster HAL service is Ready.";
     joinRpcThreadpool();
 
-shutdown:
-    // In normal operation, we don't expect the thread pool to shutdown
     LOG(ERROR) << "Keymaster HAL failed to join thread pool.";
     return -1;
 }
