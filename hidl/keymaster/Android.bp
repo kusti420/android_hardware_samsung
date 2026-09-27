@@ -30,3 +30,48 @@ cc_binary {
     owner: "samsung",
     vendor: true,
 }
+
+cc_binary {
+    name: "android.hardware.security.sharedsecret-service.samsung",
+    init_rc: ["android.hardware.security.sharedsecret-service.samsung.rc"],
+    vintf_fragments: ["android.hardware.security.sharedsecret-service.samsung.xml"],
+    srcs: ["sharedsecret_service.cpp"],
+
+    shared_libs: [
+        "android.hardware.keymaster@4.0",
+        "android.hardware.security.sharedsecret-V1-ndk",
+        "libbase",
+        "libbinder_ndk",
+        "libhidlbase",
+        "liblog",
+        "libutils",
+    ] + select(soong_config_variable("samsungVars", "target_keymaster4_library"), {
+        any @ flag_val: [flag_val],
+        default: [],
+    }),
+
+    relative_install_path: "hw",
+    owner: "samsung",
+    vendor: true,
+}
+
+cc_binary {
+    name: "samsung_hmac_init",
+    srcs: ["hmac_init.cpp"],
+
+    shared_libs: [
+        "android.hardware.keymaster@4.0",
+        "libbase",
+        "libhidlbase",
+        "liblog",
+        "libutils",
+    ] + select(soong_config_variable("samsungVars", "target_keymaster4_library"), {
+        any @ flag_val: [flag_val],
+        default: [],
+    }) + [
+        "libkeymaster4",
+    ],
+
+    owner: "samsung",
+    vendor: true,
+}
