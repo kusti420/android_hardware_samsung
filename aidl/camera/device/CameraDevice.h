@@ -80,6 +80,8 @@ class CameraDevice : public BnCameraDevice {
     bool mDisconnected;
     std::weak_ptr<CameraDeviceSession> mSession{};
     int32_t mTorchStrengthLevel = 1;
+    // Torch strength driven through the rear flash sysfs node (module lacks strength support).
+    bool mFlashNodeStrength = false;
 
     const SortedVector<std::pair<std::string, std::string>>& mCameraDeviceNames;
 

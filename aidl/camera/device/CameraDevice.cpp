@@ -10,6 +10,12 @@
 #include "convert.h"
 
 #include <cutils/trace.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <string>
 
 namespace android {
 namespace hardware {
@@ -18,6 +24,33 @@ namespace device {
 namespace implementation {
 
 std::string CameraDevice::kDeviceVersion = "1.1";
+
+namespace {
+
+// IchthysOS: most Samsung vendor camera modules don't implement set_torch_mode_strength, so the
+// framework sees a single-level torch. The rear flash LED driver takes a current step directly
+// through this node: 1001..1009 lights it at that step (same mapping as samsung-ext's flashlight
+// HAL), 0 turns it off. hal_camera_default may write it (sysfs_camera_writable).
+constexpr const char* kRearFlashNode = "/sys/devices/virtual/camera/flash/rear_flash";
+constexpr int32_t kFlashNodeValues[] = {1001, 1002, 1004, 1006, 1009};
+constexpr int32_t kFlashNodeMaxLevel = sizeof(kFlashNodeValues) / sizeof(kFlashNodeValues[0]);
+constexpr int32_t kFlashNodeDefaultLevel = 3;
+
+bool writeFlashNode(int32_t level) {
+    int fd = TEMP_FAILURE_RETRY(open(kRearFlashNode, O_WRONLY | O_CLOEXEC));
+    if (fd < 0) {
+        ALOGE("%s: open %s failed: %s", __FUNCTION__, kRearFlashNode, strerror(errno));
+        return false;
+    }
+    std::string value = std::to_string(kFlashNodeValues[level - 1]);
+    bool ok = TEMP_FAILURE_RETRY(write(fd, value.c_str(), value.size())) ==
+              static_cast<ssize_t>(value.size());
+    if (!ok) ALOGE("%s: write %s failed: %s", __FUNCTION__, kRearFlashNode, strerror(errno));
+    close(fd);
+    return ok;
+}
+
+}  // namespace
 
 CameraDevice::CameraDevice(
         sp<SamsungCameraModule> module, const std::string& cameraId,
@@ -39,6 +72,14 @@ CameraDevice::CameraDevice(
     if (mDeviceVersion < CAMERA_DEVICE_API_VERSION_3_2) {
         ALOGE("%s: Camera id %s does not support HAL3.2+", __FUNCTION__, mCameraId.c_str());
         mInitFail = true;
+    }
+
+    // Only the main rear camera owns the LED; the node's presence is checked once here.
+    mFlashNodeStrength = !mInitFail && mCameraIdInt == 0 &&
+                         !mModule->isSetTorchModeStrengthSupported() &&
+                         access(kRearFlashNode, W_OK) == 0;
+    if (mFlashNodeStrength) {
+        mTorchStrengthLevel = kFlashNodeDefaultLevel;
     }
 }
 
@@ -69,8 +110,14 @@ ndk::ScopedAStatus CameraDevice::getCameraCharacteristics(CameraMetadata* _aidl_
             common::helper::CameraMetadata metadata =
                     (camera_metadata_t*)info.static_camera_characteristics;
             camera_metadata_entry_t entry = metadata.find(ANDROID_FLASH_INFO_AVAILABLE);
-            if (entry.count > 0 && *entry.data.u8 != 0 &&
-                mModule->isSetTorchModeStrengthSupported()) {
+            if (entry.count > 0 && *entry.data.u8 != 0 && mFlashNodeStrength) {
+                int32_t defaultTorchStrength = kFlashNodeDefaultLevel;
+                int32_t torchStrengthLevels = kFlashNodeMaxLevel;
+                metadata.update(ANDROID_FLASH_INFO_STRENGTH_DEFAULT_LEVEL, &defaultTorchStrength,
+                                1);
+                metadata.update(ANDROID_FLASH_INFO_STRENGTH_MAXIMUM_LEVEL, &torchStrengthLevels, 1);
+            } else if (entry.count > 0 && *entry.data.u8 != 0 &&
+                       mModule->isSetTorchModeStrengthSupported()) {
                 // Samsung always has 5 supported torch strength levels
                 int32_t defaultTorchStrength = 1;
                 int32_t torchStrengthLevels = 5;
@@ -361,13 +408,34 @@ ndk::ScopedAStatus CameraDevice::setTorchMode(bool in_on) {
     if (status == Status::OK) {
         status = getAidlStatus(mModule->setTorchMode(mCameraId.c_str(), in_on));
         if (status == Status::OK) {
-            mTorchStrengthLevel = 1;
+            if (mFlashNodeStrength) {
+                // Plain on/off requests get the advertised default level, not the module's own.
+                mTorchStrengthLevel = kFlashNodeDefaultLevel;
+                if (in_on) writeFlashNode(mTorchStrengthLevel);
+            } else {
+                mTorchStrengthLevel = 1;
+            }
         }
     }
     return fromStatus(status);
 }
 
 ndk::ScopedAStatus CameraDevice::turnOnTorchWithStrengthLevel(int32_t in_torchStrength) {
+    if (mFlashNodeStrength) {
+        if (in_torchStrength < 1 || in_torchStrength > kFlashNodeMaxLevel) {
+            return fromStatus(Status::ILLEGAL_ARGUMENT);
+        }
+        Status status = initStatus();
+        if (status != Status::OK) return fromStatus(status);
+        // Turn on through the module (idempotent) so it keeps owning torch state and sends the
+        // TORCH status callbacks, then set the current step on the LED driver.
+        status = getAidlStatus(mModule->setTorchMode(mCameraId.c_str(), true));
+        if (status != Status::OK) return fromStatus(status);
+        if (!writeFlashNode(in_torchStrength)) return fromStatus(Status::INTERNAL_ERROR);
+        mTorchStrengthLevel = in_torchStrength;
+        return fromStatus(Status::OK);
+    }
+
     if (!mModule->isSetTorchModeStrengthSupported()) {
         return fromStatus(Status::OPERATION_NOT_SUPPORTED);
     }
