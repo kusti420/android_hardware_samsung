@@ -4,11 +4,13 @@
  */
 
 #include <android-base/file.h>
+#include <android-base/parseint.h>
 #include <android-base/strings.h>
 #include <livedisplay/samsung/SunlightEnhancement.h>
 
 #include <fstream>
 
+using android::base::ParseInt;
 using android::base::ReadFileToString;
 using android::base::Trim;
 using android::base::WriteStringToFile;
@@ -35,9 +37,15 @@ ndk::ScopedAStatus SunlightEnhancement::getEnabled(bool* _aidl_return) {
     if (!ReadFileToString(kSREPath, &tmp)) {
         return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
     }
-    contents = std::stoi(Trim(tmp));
-
-    *_aidl_return = contents == 1;
+    // IchthysOS: some panels (a52sxq) answer with text, "Current outdoor Mode:
+    // OUTDOOR_OFF_MODE" / "OUTDOOR_ON_MODE", not 0 / 1. std::stoi threw on that and the
+    // uncaught exception aborted the whole HAL.
+    const std::string value = Trim(tmp);
+    if (ParseInt(value, &contents)) {
+        *_aidl_return = contents == 1;
+    } else {
+        *_aidl_return = value.find("OUTDOOR_ON") != std::string::npos;
+    }
     return ndk::ScopedAStatus::ok();
 }
 

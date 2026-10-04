@@ -4,11 +4,13 @@
  */
 
 #include <android-base/file.h>
+#include <android-base/parseint.h>
 #include <android-base/strings.h>
 #include <livedisplay/samsung/DisplayColorCalibration.h>
 
 #include <fstream>
 
+using android::base::ParseInt;
 using android::base::ReadFileToString;
 using android::base::Split;
 using android::base::Trim;
@@ -45,7 +47,13 @@ ndk::ScopedAStatus DisplayColorCalibration::getCalibration(std::vector<int32_t>*
     if (ReadFileToString(kRGBPath, &tmp)) {
         std::vector<std::string> colors = Split(Trim(tmp), " ");
         for (const std::string& color : colors) {
-            rgb.push_back(std::stoi(color));
+            // IchthysOS: never std::stoi a sysfs node; an unexpected answer must not abort
+            // the HAL.
+            int32_t value = 0;
+            if (!ParseInt(color, &value)) {
+                return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+            }
+            rgb.push_back(value);
         }
     } else {
         return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);

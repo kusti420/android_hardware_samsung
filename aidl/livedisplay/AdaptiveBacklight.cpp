@@ -4,11 +4,13 @@
  */
 
 #include <android-base/file.h>
+#include <android-base/parseint.h>
 #include <android-base/strings.h>
 #include <livedisplay/samsung/AdaptiveBacklight.h>
 
 #include <fstream>
 
+using android::base::ParseInt;
 using android::base::ReadFileToString;
 using android::base::Trim;
 using android::base::WriteStringToFile;
@@ -34,7 +36,10 @@ ndk::ScopedAStatus AdaptiveBacklight::getEnabled(bool* _aidl_return) {
     if (!ReadFileToString(kBacklightPath, &tmp)) {
         return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
     }
-    contents = std::stoi(Trim(tmp));
+    // IchthysOS: never std::stoi a sysfs node; an unexpected answer must not abort the HAL.
+    if (!ParseInt(Trim(tmp), &contents)) {
+        return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+    }
 
     *_aidl_return = contents > 0;
     return ndk::ScopedAStatus::ok();
