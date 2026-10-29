@@ -544,27 +544,11 @@ void Session::onCaptureReady() {
 }
 
 void Session::setHBM(bool enable) {
-    // Samsung panels (S6E3FC3) have a hardware "self mask" layer that
-    // creates a focused bright circle over the optical sensor area.
-    // Without it, mask_brightness puts the ENTIRE display into HBM —
-    // all pixels go bright, light bleeds into the sensor from surrounding
-    // content, and BAuth rejects every frame as bad quality (fpop 100025).
-    // The mask image (circle position/size) is loaded from kernel data
-    // at boot by the panel driver (self_mask_img_write → TX_SELF_MASK_IMAGE).
-    // We just need to ensure the overlay layer is enabled before setting
-    // the brightness.  Disabling is unnecessary — the mask is invisible
-    // when mask_brightness is 0.
-    if (enable) {
-        int smfd = ::open("/sys/class/lcd/panel/self_mask", O_WRONLY);
-        if (smfd >= 0) {
-            ::write(smfd, "1", 1);
-            ::close(smfd);
-            LOG(INFO) << "setHBM: self_mask enabled (hardware mask layer)";
-        } else {
-            LOG(WARNING) << "setHBM: failed to open self_mask: " << strerror(errno);
-        }
-    }
-
+    // IchthysOS: mask_brightness alone. The panel's "self mask" layer
+    // (/sys/class/lcd/panel/self_mask) used to be switched on here and never off;
+    // it does not confine HBM to the sensor on this panel, and once left enabled
+    // the panel re-applied it on every brightness update: whole-screen flicker and
+    // artifacts until a reboot (2026-10-29). Never touch it.
     int fd = ::open("/sys/class/lcd/panel/mask_brightness", O_WRONLY);
     if (fd >= 0) {
         ssize_t ret = ::write(fd, enable ? "331" : "0", enable ? 3 : 1);
