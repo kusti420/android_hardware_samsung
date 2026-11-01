@@ -543,7 +543,28 @@ void Session::onCaptureReady() {
     mCaptureReady = true;
 }
 
+// IchthysOS experiment (2026-11-01): light only the sensor area. mask_brightness drives the whole
+// panel to HBM (the owner gets "flashbanged" in the evening); the DDI can instead draw its own
+// green circle at the sensor (fp_green_circle, TX_SELF_MASK_GREEN_CIRCLE_ON). Opt-in by creating
+// /data/vendor/biometrics/ichthys_local_illum (root: touch / rm); without it nothing changes.
+// Unknown yet whether the ET713 captures under the circle alone.
+static bool useLocalIllumination() {
+    struct stat st;
+    return ::stat("/data/vendor/biometrics/ichthys_local_illum", &st) == 0;
+}
+
 void Session::setHBM(bool enable) {
+    if (useLocalIllumination()) {
+        int gfd = ::open("/sys/class/lcd/panel/fp_green_circle", O_WRONLY);
+        if (gfd >= 0) {
+            ssize_t ret = ::write(gfd, enable ? "1" : "0", 1);
+            ::close(gfd);
+            LOG(INFO) << "setHBM(" << enable << ") local fp_green_circle write=" << ret;
+            return;
+        }
+        LOG(WARNING) << "setHBM: fp_green_circle not writable (" << strerror(errno)
+                     << "), falling back to mask_brightness";
+    }
     // IchthysOS: mask_brightness alone. The panel's "self mask" layer
     // (/sys/class/lcd/panel/self_mask) used to be switched on here and never off;
     // it does not confine HBM to the sensor on this panel, and once left enabled
