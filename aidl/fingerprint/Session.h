@@ -77,6 +77,9 @@ class Session : public BnSession {
     bool mCaptureReady = false;
 
     void setHBM(bool enable);
+    // IchthysOS: finger on/off the sensor as far as the mask HBM watchdog is concerned
+    // (persist.ichthys.udfps_sync, see Session.cpp).
+    static void noteFingerDown(bool down);
     Error VendorErrorFilter(int32_t error, int32_t* vendorCode);
     AcquiredInfo VendorAcquiredFilter(int32_t info, int32_t* vendorCode);
     bool checkSensorLockout();

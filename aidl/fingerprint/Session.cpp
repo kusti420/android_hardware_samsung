@@ -12,8 +12,11 @@
 #include <fingerprint.sysprop.h>
 
 #include <android-base/logging.h>
+#include <android-base/properties.h>
 
+#include <atomic>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <dirent.h>
 #include <endian.h>
@@ -224,6 +227,7 @@ ndk::ScopedAStatus Session::close() {
     // session invalidates the HAT challenge from generateChallenge(), causing
     // BAuth_Hat_OP to fail with error 61 on the next enrollment attempt.
     // The TEE session lifetime is tied to the HAL service, not the AIDL Session.
+    noteFingerDown(false);
     setHBM(false);
     mClosed = true;
     mCb->onSessionClosed();
@@ -234,6 +238,7 @@ ndk::ScopedAStatus Session::close() {
 ndk::ScopedAStatus Session::onPointerDown(int32_t /*pointerId*/, int32_t /*x*/, int32_t /*y*/,
                                           float /*minor*/, float /*major*/) {
     LOG(INFO) << "onPointerDown";
+    noteFingerDown(true);
 
     // NOTE: HBM is deliberately NOT enabled here. mask_brightness drives the
     // WHOLE panel to 547 nits, and SystemUI's dim overlay needs a frame or two
@@ -271,6 +276,7 @@ ndk::ScopedAStatus Session::onPointerUp(int32_t /*pointerId*/) {
         mHal.request(SEM_REQUEST_TOUCH_EVENT, 1);
     }
 
+    noteFingerDown(false);
     setHBM(false);
 
     return ndk::ScopedAStatus::ok();
@@ -336,6 +342,7 @@ ndk::ScopedAStatus Session::cancel() {
     int32_t ret = mHal.ss_fingerprint_cancel();
 
     if (ret == 0) {
+        noteFingerDown(false);
         setHBM(false);
         mCb->onError(Error::CANCELED, 0 /* vendorCode */);
 
@@ -463,6 +470,7 @@ void Session::notify(const fingerprint_msg_t* msg) {
             int32_t vendorCode = 0;
             Error result = VendorErrorFilter(msg->data.error, &vendorCode);
             LOG(INFO) << "onError(" << static_cast<int>(result) << ")";
+            noteFingerDown(false);  // errors (lockout, timeout, ...) tear the overlay down
             setHBM(false);
             mCb->onError(result, vendorCode);
         } break;
@@ -491,6 +499,7 @@ void Session::notify(const fingerprint_msg_t* msg) {
             // Enrollment completion also tears the overlay down without a
             // finger-up, so release HBM here too (see onAuthenticated above).
             if (msg->data.enroll.samples_remaining == 0) {
+                noteFingerDown(false);
                 setHBM(false);
             }
             break;
@@ -509,6 +518,11 @@ void Session::notify(const fingerprint_msg_t* msg) {
             // onPointerUp never reaches us and HBM would stay on forever —
             // pinning the panel at 547 nits and making the brightness slider
             // appear dead. Always drop HBM when authentication concludes.
+            // IchthysOS: a match tears the overlay down (no finger-up follows); after a reject
+            // the finger may still be on the sensor, and the finger-up will come.
+            if (msg->data.authenticated.finger.fid != 0) {
+                noteFingerDown(false);
+            }
             setHBM(false);
             if (msg->data.authenticated.finger.fid != 0) {
                 const hw_auth_token_t hat = msg->data.authenticated.hat;
@@ -553,6 +567,111 @@ static bool useLocalIllumination() {
     return ::stat("/data/vendor/biometrics/ichthys_local_illum", &st) == 0;
 }
 
+// IchthysOS: frame-synced mask HBM, switched by persist.ichthys.udfps_sync (default off).
+// With it on, SystemUI shows a nits-matched dim window ("UdfpsFodMask") while the finger is down,
+// SurfaceFlinger flags that layer, and the composer sets the panel connector's fingerprint_mask in
+// the very atomic commit that first shows / first drops it; the kernel sends the mask HBM DCS in
+// that commit's kickoff (sde_connector_pre_kickoff -> dsi_display_pre_kickoff). The dim and the
+// HBM therefore change on the same frame, so the screen keeps its brightness. This HAL then only
+// confirms the HBM (onUiReady) and keeps the old mask_brightness write as the fallback; it must not
+// switch HBM off itself while the dim is still up (that is exactly the flash being removed), so
+// release is left to the composer, with a watchdog for the case that it never happens.
+// With the switch off everything below behaves exactly as before.
+static constexpr const char* kMaskBrightness = "/sys/class/lcd/panel/mask_brightness";
+static constexpr const char* kActualMaskBrightness = "/sys/class/lcd/panel/actual_mask_brightness";
+// How long onUiReady waits for the frame-synced HBM before writing mask_brightness itself. The dim
+// has drawn and been latched by then, so the HBM is normally on already; the kernel's own HBM
+// sequence (2 TE + 9 ms + one frame) is well under this.
+static constexpr int kSyncConfirmTimeoutMs = 150;
+// How long after a release the mask HBM may still be on before the HAL forces it off.
+static constexpr int kSyncReleaseWatchdogMs = 1500;
+
+// Panel state is global, not per Session: shared by all sessions and the watchdog threads.
+static std::atomic<uint64_t> gTouchGeneration{0};
+static std::atomic<bool> gFingerDown{false};
+// The HAL itself switched the mask on through mask_brightness (sync fallback): off is ours too.
+static std::atomic<bool> gSysfsMaskOwned{false};
+
+static bool udfpsSyncEnabled() {
+    return ::android::base::GetBoolProperty("persist.ichthys.udfps_sync", false);
+}
+
+void Session::noteFingerDown(bool down) {
+    if (down) {
+        gTouchGeneration.fetch_add(1);
+    }
+    gFingerDown.store(down);
+}
+
+// actual_mask_brightness: the mask level while the kernel's finger_mask is set, 0 otherwise.
+static int readActualMask(int fd) {
+    char buf[16] = {};
+    ssize_t n = ::pread(fd, buf, sizeof(buf) - 1, 0);
+    if (n <= 0) {
+        return -1;
+    }
+    return static_cast<int>(::strtol(buf, nullptr, 10));
+}
+
+// Waits until the mask state is [on] (sysfs_notify on actual_mask_brightness, fired by
+// ss_brightness_dcs once the mask DCS went out), at most [timeoutMs].
+static bool waitForActualMask(bool on, int timeoutMs) {
+    int fd = ::open(kActualMaskBrightness, O_RDONLY);
+    if (fd < 0) {
+        LOG(WARNING) << "udfps_sync: cannot open actual_mask_brightness: " << strerror(errno);
+        return false;
+    }
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    bool reached = false;
+    while (true) {
+        int value = readActualMask(fd);  // also re-arms the sysfs poll
+        if (value >= 0 && (value != 0) == on) {
+            reached = true;
+            break;
+        }
+        auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+        if (left.count() <= 0) {
+            break;
+        }
+        struct pollfd pfd = {.fd = fd, .events = POLLPRI | POLLERR, .revents = 0};
+        if (::poll(&pfd, 1, static_cast<int>(left.count())) < 0 && errno != EINTR) {
+            break;
+        }
+    }
+    ::close(fd);
+    return reached;
+}
+
+// After a release the composer drops the mask with the frame that removes SystemUI's dim. If the
+// mask is still on long after that and no new touch started, something in that chain failed:
+// force it off so the panel can never stay pinned at the mask level (brightness slider "dead").
+static void armSyncReleaseWatchdog() {
+    const uint64_t generation = gTouchGeneration.load();
+    std::thread([generation]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(kSyncReleaseWatchdogMs));
+        if (gTouchGeneration.load() != generation || gFingerDown.load()) {
+            return;  // a new touch owns the mask now
+        }
+        int fd = ::open(kActualMaskBrightness, O_RDONLY);
+        if (fd < 0) {
+            return;
+        }
+        int value = readActualMask(fd);
+        ::close(fd);
+        if (value <= 0) {
+            return;
+        }
+        LOG(ERROR) << "udfps_sync: mask HBM still on (" << value << ") " << kSyncReleaseWatchdogMs
+                   << " ms after release, forcing mask_brightness 0";
+        int wfd = ::open(kMaskBrightness, O_WRONLY);
+        if (wfd >= 0) {
+            (void)::write(wfd, "0", 1);
+            ::close(wfd);
+        }
+    }).detach();
+}
+
 void Session::setHBM(bool enable) {
     if (useLocalIllumination()) {
         int gfd = ::open("/sys/class/lcd/panel/fp_green_circle", O_WRONLY);
@@ -565,12 +684,32 @@ void Session::setHBM(bool enable) {
         LOG(WARNING) << "setHBM: fp_green_circle not writable (" << strerror(errno)
                      << "), falling back to mask_brightness";
     }
+    if (udfpsSyncEnabled()) {
+        if (enable) {
+            if (waitForActualMask(true, kSyncConfirmTimeoutMs)) {
+                LOG(INFO) << "setHBM(1) udfps_sync: mask HBM on with the dim frame";
+                return;
+            }
+            LOG(WARNING) << "setHBM(1) udfps_sync: no frame-synced mask HBM after "
+                         << kSyncConfirmTimeoutMs << " ms, falling back to mask_brightness";
+            gSysfsMaskOwned.store(true);
+            // fall through to the mask_brightness write
+        } else if (gSysfsMaskOwned.exchange(false)) {
+            LOG(INFO) << "setHBM(0) udfps_sync: releasing the fallback mask_brightness";
+            // fall through: we switched it on, so we switch it off
+        } else {
+            // The composer drops it with the frame that removes the dim.
+            LOG(INFO) << "setHBM(0) udfps_sync: left to the dim frame";
+            armSyncReleaseWatchdog();
+            return;
+        }
+    }
     // IchthysOS: mask_brightness alone. The panel's "self mask" layer
     // (/sys/class/lcd/panel/self_mask) used to be switched on here and never off;
     // it does not confine HBM to the sensor on this panel, and once left enabled
     // the panel re-applied it on every brightness update: whole-screen flicker and
     // artifacts until a reboot (2026-10-29). Never touch it.
-    int fd = ::open("/sys/class/lcd/panel/mask_brightness", O_WRONLY);
+    int fd = ::open(kMaskBrightness, O_WRONLY);
     if (fd >= 0) {
         ssize_t ret = ::write(fd, enable ? "331" : "0", enable ? 3 : 1);
         ::close(fd);
@@ -585,7 +724,7 @@ void Session::setHBM(bool enable) {
     // ss_brightness_dcs fires sysfs_notify("actual_mask_brightness") after the
     // DSI commands complete.  We poll for that event so BAuth never captures
     // before HBM is physically on (or off).
-    int afd = ::open("/sys/class/lcd/panel/actual_mask_brightness", O_RDONLY);
+    int afd = ::open(kActualMaskBrightness, O_RDONLY);
     if (afd >= 0) {
         // Prime the sysfs poll (initial read required before poll triggers).
         char buf[16];
