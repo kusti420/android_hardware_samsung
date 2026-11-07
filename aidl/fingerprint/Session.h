@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <aidl/android/hardware/biometrics/fingerprint/BnSession.h>
 #include <aidl/android/hardware/biometrics/fingerprint/ISessionCallback.h>
 
@@ -85,11 +86,13 @@ class Session : public BnSession {
     bool checkSensorLockout();
     void clearLockout(bool clearAttemptCounter);
     void startLockoutTimer(int64_t timeout);
-    void lockoutTimerExpired();
+    void lockoutTimerExpired(uint64_t generation);
 
     // lockout timer
     bool mIsLockoutTimerStarted = false;
     bool mIsLockoutTimerAborted = false;
+    // IchthysOS: bumped per timer; an expired timer only acts if it is still the newest one.
+    std::atomic<uint64_t> mLockoutTimerGeneration{0};
 
     // The user ID for which this session was created.
     int32_t mUserId;

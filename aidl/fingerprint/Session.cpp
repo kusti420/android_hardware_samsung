@@ -433,7 +433,9 @@ bool Session::checkSensorLockout() {
         int64_t timeLeft = mLockoutTracker.getLockoutTimeLeft();
         LOG(ERROR) << "Fail: lockout timed " << timeLeft;
         mCb->onLockoutTimed(timeLeft);
-        if (!mIsLockoutTimerStarted) startLockoutTimer(timeLeft);
+        // IchthysOS: a PIN reset aborts the running timer but leaves it "started"; a new timed
+        // lockout before it expired then got no timer of its own and was never cleared.
+        if (!mIsLockoutTimerStarted || mIsLockoutTimerAborted) startLockoutTimer(timeLeft);
         return true;
     }
     return false;
@@ -446,7 +448,8 @@ void Session::clearLockout(bool clearAttemptCounter) {
 
 void Session::startLockoutTimer(int64_t timeout) {
     mIsLockoutTimerAborted = false;
-    std::function<void()> action = std::bind(&Session::lockoutTimerExpired, this);
+    const uint64_t generation = ++mLockoutTimerGeneration;
+    std::function<void()> action = std::bind(&Session::lockoutTimerExpired, this, generation);
     std::thread([timeout, action]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
         action();
@@ -455,7 +458,9 @@ void Session::startLockoutTimer(int64_t timeout) {
     mIsLockoutTimerStarted = true;
 }
 
-void Session::lockoutTimerExpired() {
+void Session::lockoutTimerExpired(uint64_t generation) {
+    // A newer timer replaced this one (lockout re-armed after a PIN reset): it owns the flags.
+    if (generation != mLockoutTimerGeneration) return;
     if (!mIsLockoutTimerAborted) {
         clearLockout(false);
     }
