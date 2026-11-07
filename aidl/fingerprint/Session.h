@@ -89,8 +89,9 @@ class Session : public BnSession {
     void lockoutTimerExpired(uint64_t generation);
 
     // lockout timer
-    bool mIsLockoutTimerStarted = false;
-    bool mIsLockoutTimerAborted = false;
+    // IchthysOS: set by binder threads and the timer thread.
+    std::atomic<bool> mIsLockoutTimerStarted{false};
+    std::atomic<bool> mIsLockoutTimerAborted{false};
     // IchthysOS: bumped per timer; an expired timer only acts if it is still the newest one.
     std::atomic<uint64_t> mLockoutTimerGeneration{0};
 

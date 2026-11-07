@@ -449,10 +449,15 @@ void Session::clearLockout(bool clearAttemptCounter) {
 void Session::startLockoutTimer(int64_t timeout) {
     mIsLockoutTimerAborted = false;
     const uint64_t generation = ++mLockoutTimerGeneration;
-    std::function<void()> action = std::bind(&Session::lockoutTimerExpired, this, generation);
-    std::thread([timeout, action]() {
+    // IchthysOS: the timer holds the session weakly. The framework replaces the session (system
+    // server restart, user switch) while a lockout timer sleeps; the raw this it held was then
+    // used after free.
+    std::weak_ptr<Session> weak = ref<Session>();
+    std::thread([timeout, weak, generation]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
-        action();
+        if (std::shared_ptr<Session> self = weak.lock()) {
+            self->lockoutTimerExpired(generation);
+        }
     }).detach();
 
     mIsLockoutTimerStarted = true;
