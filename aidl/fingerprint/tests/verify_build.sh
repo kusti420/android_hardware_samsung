@@ -409,8 +409,9 @@ fi
 echo ""
 echo "── Device (live state) ──"
 
+# Device serial from ICHTHYS_SERIAL or ANDROID_SERIAL; without one the live checks are skipped.
 ICHTHYS_SERIAL="${ICHTHYS_SERIAL:-${ANDROID_SERIAL:-}}"
-if adb -s "$ICHTHYS_SERIAL" get-state >/dev/null 2>&1; then
+if [[ -n "$ICHTHYS_SERIAL" ]] && adb -s "$ICHTHYS_SERIAL" get-state >/dev/null 2>&1; then
     # type_check value
     TYPE_CHECK=$(adb -s "$ICHTHYS_SERIAL" shell cat /sys/class/fingerprint/fingerprint/type_check 2>/dev/null || echo "?")
     if [[ "$TYPE_CHECK" == "1" ]]; then
