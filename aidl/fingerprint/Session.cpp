@@ -239,6 +239,7 @@ ndk::ScopedAStatus Session::onPointerDown(int32_t /*pointerId*/, int32_t /*x*/, 
                                           float /*minor*/, float /*major*/) {
     LOG(INFO) << "onPointerDown";
     noteFingerDown(true);
+    mCaptureReported.store(false);
 
     // NOTE: HBM is deliberately NOT enabled here. mask_brightness drives the
     // WHOLE panel to 547 nits, and SystemUI's dim overlay needs a frame or two
@@ -489,6 +490,7 @@ void Session::notify(const fingerprint_msg_t* msg) {
             AcquiredInfo result =
                     VendorAcquiredFilter(msg->data.acquired.acquired_info, &vendorCode);
             LOG(INFO) << "onAcquired(" << static_cast<int>(result) << ")";
+            mCaptureReported.store(true);
             mCb->onAcquired(result, vendorCode);
         } break;
         case FINGERPRINT_TEMPLATE_ENROLLING:
@@ -501,6 +503,7 @@ void Session::notify(const fingerprint_msg_t* msg) {
                     mHal.ss_fingerprint_cancel();
                 }
             }
+            reportCaptureGood("enroll result");
             LOG(INFO) << "onEnrollResult(fid=" << msg->data.enroll.finger.fid
                        << ", gid=" << msg->data.enroll.finger.gid
                        << ", rem=" << msg->data.enroll.samples_remaining << ")";
@@ -528,6 +531,9 @@ void Session::notify(const fingerprint_msg_t* msg) {
             // onPointerUp never reaches us and HBM would stay on forever —
             // pinning the panel at 547 nits and making the brightness slider
             // appear dead. Always drop HBM when authentication concludes.
+            // IchthysOS: the capture is done either way; a reject must not leave the light on
+            // while the finger rests (a no-op when CAPTURE_SUCCESS already reported it).
+            reportCaptureGood("authenticated");
             // IchthysOS: a match tears the overlay down (no finger-up follows); after a reject
             // the finger may still be on the sensor, and the finger-up will come.
             if (msg->data.authenticated.finger.fid != 0) {
@@ -565,6 +571,10 @@ void Session::notify(const fingerprint_msg_t* msg) {
 void Session::onCaptureReady() {
     LOG(INFO) << "onCaptureReady";
     mCaptureReady = true;
+}
+
+void Session::onCaptureSucceeded() {
+    reportCaptureGood("CAPTURE_SUCCESS");
 }
 
 // IchthysOS experiment (2026-11-01): light only the sensor area. mask_brightness drives the whole
@@ -754,6 +764,28 @@ void Session::setHBM(bool enable) {
             LOG(WARNING) << "setHBM(" << enable << ") poll error: " << strerror(errno);
         }
         ::close(afd);
+    }
+}
+
+// IchthysOS 2026-11-08 (owner: "turn off the fingerprint brightening as soon as the sensor has
+// read the finger"): BAuth reports a usable image only as SEM CAPTURE_SUCCESS, never as an
+// acquired message, so the framework heard nothing between the touch and the match result and
+// SystemUI kept the illumination (and, through its UdfpsFodMask dim, the frame-synced mask HBM)
+// up for as long as the finger rested, e.g. after a reject. AcquiredInfo::GOOD is AOSP's "capture
+// done": FingerprintService forwards it to SystemUI's UdfpsController.onAcquired, which drops
+// the disc and the mask at once. Bad captures keep their own path (CAPTURE_FAILED ->
+// INSUFFICIENT) and the next touch lights everything again, so retries are unchanged.
+// Once per touch: whichever of CAPTURE_SUCCESS / the result comes first.
+void Session::reportCaptureGood(const char* why) {
+    if (mCaptureReported.exchange(true)) {
+        return;
+    }
+    LOG(INFO) << "onAcquired(GOOD) capture done (" << why << ")";
+    mCb->onAcquired(AcquiredInfo::GOOD, 0 /* vendorCode */);
+    // The sync fallback (the HAL wrote mask_brightness itself because no frame-synced HBM came)
+    // is ours to release; otherwise the mask follows SystemUI's dim, which goes now.
+    if (udfpsSyncEnabled() && gSysfsMaskOwned.load()) {
+        setHBM(false);
     }
 }
 

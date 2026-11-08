@@ -240,6 +240,11 @@ void Fingerprint::handleEvent(int eventCode) {
         } break;
         case SEM_FINGERPRINT_EVENT_CAPTURE_SUCCESS: {
             LOG(INFO) << "SEM event: CAPTURE_SUCCESS (enrollment accepted)";
+            // IchthysOS: the image is taken (auth too): tell the framework, so the illumination
+            // goes off while the finger may still rest (Session::reportCaptureGood).
+            if (mSession != nullptr && !mSession->isClosed()) {
+                mSession->onCaptureSucceeded();
+            }
         } break;
         case SEM_FINGERPRINT_EVENT_CAPTURE_FAILED: {
             LOG(INFO) << "SEM event: CAPTURE_FAILED (bad quality)";

@@ -70,12 +70,19 @@ class Session : public BnSession {
     bool isClosed();
     void notify(const fingerprint_msg_t* msg);
     void onCaptureReady();
+    // IchthysOS: BAuth took a usable image (SEM CAPTURE_SUCCESS); see reportCaptureGood.
+    void onCaptureSucceeded();
 
   private:
     LegacyHAL mHal;
     LockoutTracker mLockoutTracker;
     bool mClosed = false;
     bool mCaptureReady = false;
+    // IchthysOS: this touch's capture outcome already went to the framework as an onAcquired
+    // (GOOD, or a bad-quality code). Reset at every pointer-down. Set from BAuth's callback
+    // threads, read there and on binder threads.
+    std::atomic<bool> mCaptureReported{false};
+    void reportCaptureGood(const char* why);
 
     void setHBM(bool enable);
     // IchthysOS: finger on/off the sensor as far as the mask HBM watchdog is concerned
